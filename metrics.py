@@ -7,7 +7,15 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import matplotlib.path as mpath
 from PIL import Image
+from shapely.geometry import Polygon as ShapelyPolygon
+
+
+class Shape(Protocol):
+    def iou(self, other: "Shape") -> float: ...
+    def union(self, other: "Shape") -> "Shape": ...
+    def draw(self, ax, conf: Union[float, None], color: str = "blue"): ...
 
 
 @dataclass
@@ -27,52 +35,83 @@ class Box:
         self.top_left = top_left
         self.bottom_right = bottom_right
 
-    def iou(self, other: "Box") -> float:
-        inter_area = self.intersection_area(other)
-        union_area = self.area() + other.area() - inter_area
+    def iou(self, other: "Shape") -> float:
+        if not isinstance(other, Box):
+            raise Exception(
+                "iou can only be calculated between shapes of the same type"
+            )
+
+        inter_area = self._intersection_area(other)
+        union_area = self._area() + other._area() - inter_area
         return inter_area / union_area if union_area > 0 else 0
 
-    def intersection_area(self, other: "Box") -> float:
-        inter_top_left = self.top_left_inter(other)
-        inter_bottom_right = self.bottom_right_inter(other)
+    def union(self, other: "Shape") -> "Shape":
+        if not isinstance(other, Box):
+            raise Exception(
+                "union can only be calculated between shapes of the same type"
+            )
+
+        return Box(
+            top_left=self._top_left_union(other),
+            bottom_right=self._bottom_right_union(other),
+        )
+
+    def draw(self, ax, conf: Union[float, None], color: str = "blue"):
+        width = self.bottom_right.x - self.top_left.x
+        height = self.bottom_right.y - self.top_left.y
+
+        rect = patches.Rectangle(
+            (self.top_left.x, self.top_left.y),
+            width,
+            height,
+            linewidth=2,
+            edgecolor=color,
+            facecolor="none",
+            alpha=0.7,
+        )
+        ax.add_patch(rect)
+
+        if conf is not None:
+            x = self.top_left.x
+            y = self.top_left.y - 5
+            bbox_props = dict(boxstyle="round,pad=0.3", fc=color, ec="none", alpha=0.7)
+            ax.text(x, y, f"{conf:.2f}", color="white", fontsize=8, bbox=bbox_props)
+
+    def _intersection_area(self, other: "Box") -> float:
+        inter_top_left = self._top_left_inter(other)
+        inter_bottom_right = self._bottom_right_inter(other)
 
         inter_box = Box(inter_top_left, inter_bottom_right)
         if not inter_box._is_valid():
             return 0
 
-        return inter_box.area()
+        return inter_box._area()
 
-    def union(self, other: "Box") -> "Box":
-        return Box(
-            top_left=self.top_left_union(other),
-            bottom_right=self.bottom_right_union(other),
-        )
-
-    def top_left_union(self, other: "Box") -> Coords:
+    def _top_left_union(self, other: "Box") -> Coords:
         return Coords(
             min(self.top_left.x, other.top_left.x),
             min(self.top_left.y, other.top_left.y),
         )
 
-    def bottom_right_union(self, other: "Box") -> Coords:
+    def _bottom_right_union(self, other: "Box") -> Coords:
         return Coords(
             max(self.bottom_right.x, other.bottom_right.x),
             max(self.bottom_right.y, other.bottom_right.y),
         )
 
-    def top_left_inter(self, other: "Box") -> Coords:
+    def _top_left_inter(self, other: "Box") -> Coords:
         return Coords(
             max(self.top_left.x, other.top_left.x),
             max(self.top_left.y, other.top_left.y),
         )
 
-    def bottom_right_inter(self, other: "Box") -> Coords:
+    def _bottom_right_inter(self, other: "Box") -> Coords:
         return Coords(
             min(self.bottom_right.x, other.bottom_right.x),
             min(self.bottom_right.y, other.bottom_right.y),
         )
 
-    def area(self) -> float:
+    def _area(self) -> float:
         width = self.bottom_right.x - self.top_left.x
         height = self.bottom_right.y - self.top_left.y
         return width * height
@@ -84,10 +123,77 @@ class Box:
         )
 
 
+class Polygon:
+    def __init__(self, points: list[tuple[float, float]]):
+        polygon = ShapelyPolygon(points)
+        if not polygon.is_valid:
+            polygon = polygon.buffer(0)
+
+        if polygon.geom_type == "MultiPolygon":
+            largest = max(polygon.geoms, key=lambda g: g.area)  # type:ignore
+            polygon = ShapelyPolygon(list(largest.exterior.coords))
+
+        self._polygon = polygon
+
+    def iou(self, other: "Shape") -> float:
+        if not isinstance(other, Polygon):
+            raise Exception(
+                "union can only be calculated between shapes of the same type"
+            )
+
+        inter_area = self._intersection_area(other)
+        union_area = self._area() + other._area() - inter_area
+        return inter_area / union_area if union_area > 0 else 0
+
+    def union(self, other: "Shape") -> "Shape":
+        if not isinstance(other, Polygon):
+            raise Exception(
+                "union can only be calculated between shapes of the same type"
+            )
+
+        new_polygon = self._polygon.union(other._polygon)
+        if new_polygon.geom_type == "MultiPolygon":
+            largest = max(new_polygon.geoms, key=lambda g: g.area)  # type:ignore
+            return Polygon(list(largest.exterior.coords))
+
+        return Polygon(list(new_polygon.exterior.coords))  # type:ignore
+
+    def draw(self, ax, conf: Union[float, None], color: str = "blue"):
+        x, y = self._polygon.exterior.xy
+        path_data = list(zip(x, y))
+        path = mpath.Path(path_data, closed=True)
+        patch = patches.PathPatch(
+            path, facecolor="none", edgecolor=color, lw=2, alpha=0.7
+        )
+        ax.add_patch(patch)
+
+        if conf is not None and len(x) > 0 and len(y) > 0:
+            x_text = x[0]
+            y_text = y[0] - 5
+            bbox_props = dict(boxstyle="round,pad=0.3", fc=color, ec="none", alpha=0.7)
+            ax.text(
+                x_text,
+                y_text,
+                f"{conf:.2f}",
+                color="white",
+                fontsize=8,
+                bbox=bbox_props,
+            )
+
+    def _intersection_area(self, other: "Polygon") -> float:
+        return self._polygon.intersection(other._polygon).area
+
+    def _area(self) -> float:
+        return self._polygon.area
+
+    def is_valid(self) -> bool:
+        return not self._polygon.is_empty
+
+
 class Prediction:
-    def __init__(self, id: str, box: Box, class_name: str, conf: float):
+    def __init__(self, id: str, shape: Shape, class_name: str, conf: float):
         self.id = id
-        self.box = box
+        self.shape = shape
         self.conf = conf
         self.class_name = class_name
 
@@ -101,9 +207,9 @@ class Prediction:
 
 
 class Annotation:
-    def __init__(self, id: str, box: Box, class_name: str):
+    def __init__(self, id: str, shape: Shape, class_name: str):
         self.id = id
-        self.box = box
+        self.shape = shape
         self.class_name = class_name
 
     def __eq__(self, other):
@@ -192,7 +298,7 @@ class DupsAreErrorsAlgo:
         for annotation in annotations:
             if annotation in matched_annotations:
                 continue
-            iou = prediction.box.iou(annotation.box)
+            iou = prediction.shape.iou(annotation.shape)
             if iou >= self.iou_thres and iou > best_iou:
                 best_iou = iou
                 best_match = annotation
@@ -241,7 +347,7 @@ class OverlappingAlgo:
 
         for prediction in predictions:
             for annotation in annotations:
-                if prediction.box.iou(annotation.box) >= self.iou_thres:
+                if prediction.shape.iou(annotation.shape) >= self.iou_thres:
                     matched_annotations.add(annotation)
                     matched_predictions.add(prediction)
 
@@ -293,7 +399,7 @@ class PredictionDeduplicator:
         for pred in predictions:
             is_duplicate = any(
                 pred.class_name == existing_pred.class_name
-                and pred.box.iou(existing_pred.box) >= self.iou_thres
+                and pred.shape.iou(existing_pred.box) >= self.iou_thres
                 for existing_pred in unique_preds
             )
             if not is_duplicate:
@@ -335,13 +441,13 @@ class PredictionMerger:
             for pred in predictions:
                 if (
                     pred.class_name == base_pred.class_name
-                    and base_pred.box.iou(pred.box) >= self.iou_thres
+                    and base_pred.shape.iou(pred.shape) >= self.iou_thres
                 ):
                     overlapping.append(pred)
                 else:
                     non_overlapping.append(pred)
 
-            merged_box = self._merge_boxes([pred.box for pred in overlapping])
+            merged_box = self._merge_boxes([pred.shape for pred in overlapping])
 
             merged_preds.append(
                 Prediction(
@@ -356,7 +462,7 @@ class PredictionMerger:
 
         return merged_preds
 
-    def _merge_boxes(self, boxes: list[Box]):
+    def _merge_boxes(self, boxes: list[Shape]):
         merged_box = boxes[0]
         for box in boxes[1:]:
             merged_box = merged_box.union(box)
@@ -370,17 +476,19 @@ class CocoSource:
         annotations_file_path: Union[str, Path],
         conf_thres: float,
         images_dir_path: Union[str, Path] = "./",
+        load_polygons: bool = False,
     ):
         self.preds_file_path = preds_file_path
         self.annotations_file_path = annotations_file_path
         self.conf_thres = conf_thres
         self.images_dir_path = images_dir_path
+        self.load_polygons = load_polygons
 
     def load_results(self) -> list[Result]:
         classes_map = self._get_classes_map()
         preds_by_image = self._load_predictions(classes_map)
         annotations_by_image = self._load_annotations(classes_map)
-        pathes_by_image_id = self._load_pathes(self.images_dir_path)
+        pathes_by_image_id = self._load_paths(self.images_dir_path)
 
         results = []
         for image_id, image_path in pathes_by_image_id.items():
@@ -409,7 +517,7 @@ class CocoSource:
 
         return categories
 
-    def _load_pathes(self, images_dir_path: Union[str, Path]) -> dict[int, str]:
+    def _load_paths(self, images_dir_path: Union[str, Path]) -> dict[int, str]:
         pathes_by_image_id = {}
 
         with open(self.annotations_file_path, "r") as f:
@@ -431,20 +539,22 @@ class CocoSource:
         annos_by_image = {}
         for item in data["annotations"]:
             image_id = item["image_id"]
-            x, y, width, height = map(float, item["bbox"])
-            top_left = Coords(x, y)
-            bottom_right = Coords(x + width, y + height)
+            class_name = classes_map[item["category_id"]]
+
+            if self.load_polygons and "segmentation" in item and item["segmentation"]:
+                shape = self._make_polygon(item["segmentation"])
+            else:
+                x, y, width, height = map(float, item["bbox"])
+                top_left = Coords(x, y)
+                bottom_right = Coords(x + width, y + height)
+                shape = Box(top_left, bottom_right)
 
             anno = Annotation(
                 id=str(uuid.uuid4()),
-                box=Box(top_left, bottom_right),
-                class_name=classes_map[item["category_id"]],
+                shape=shape,
+                class_name=class_name,
             )
-
-            if image_id not in annos_by_image:
-                annos_by_image[image_id] = []
-
-            annos_by_image[image_id].append(anno)
+            annos_by_image.setdefault(image_id, []).append(anno)
 
         return annos_by_image
 
@@ -459,24 +569,32 @@ class CocoSource:
             conf = item["score"]
             if conf < self.conf_thres:
                 continue
-
             image_id = item["image_id"]
-            x, y, width, height = map(float, item["bbox"])
-            top_left = Coords(x, y)
-            bottom_right = Coords(x + width, y + height)
+            class_name = classes_map[item["category_id"]]
+
+            if self.load_polygons and "segmentation" in item and item["segmentation"]:
+                shape = self._make_polygon(item["segmentation"])
+            else:
+                x, y, width, height = map(float, item["bbox"])
+                top_left = Coords(x, y)
+                bottom_right = Coords(x + width, y + height)
+                shape = Box(top_left, bottom_right)
 
             pred = Prediction(
                 id=str(uuid.uuid4()),
-                box=Box(top_left, bottom_right),
-                class_name=classes_map[item["category_id"]],
+                shape=shape,
+                class_name=class_name,
                 conf=conf,
             )
-
-            if image_id not in boxes_by_image:
-                boxes_by_image[image_id] = []
-            boxes_by_image[image_id].append(pred)
+            boxes_by_image.setdefault(image_id, []).append(pred)
 
         return boxes_by_image
+
+    def _make_polygon(self, segmentation: list[list[float]]) -> Polygon:
+        # Предполагается, что всегда ровно один список координат
+        seg = segmentation[0]
+        coords = [(seg[i], seg[i + 1]) for i in range(0, len(seg), 2)]
+        return Polygon(coords)
 
 
 class UltralyticsSource:
@@ -486,11 +604,13 @@ class UltralyticsSource:
         actual_data_dir: str,
         conf_thres: float,
         categories: list[Category],
+        load_polygons: bool = False,
     ):
         self.preds_dir = preds_dir
         self.actual_data_dir = actual_data_dir
         self.conf_thres = conf_thres
         self.classes_map = {c.index: c.name for c in categories}
+        self.load_polygons = load_polygons
 
     def load_results(self) -> list[Result]:
         results = []
@@ -526,17 +646,26 @@ class UltralyticsSource:
         annotations = []
         with open(ann_file, "r") as f:
             for line in f:
-                class_idx, x_center, y_center, width, height = map(
-                    float, line.strip().split()
-                )
+                floats = list(map(float, line.strip().split()))
+                class_idx = int(floats[0])
 
-                box = self._convert_to_box(
-                    x_center, y_center, width, height, img_width, img_height
-                )
+                if not self.load_polygons:
+                    if len(floats) != 5:
+                        raise Exception("wrong bbox format")
+
+                    x_center, y_center, width, height = floats[1:]
+                    shape = self._convert_to_box(
+                        x_center, y_center, width, height, img_width, img_height
+                    )
+                else:
+                    if len(floats) < 3:
+                        raise Exception("wrong polygons format")
+                    shape = self._convert_to_polygon(floats[1:], img_width, img_height)
+
                 anno = Annotation(
                     id=str(uuid.uuid4()),
-                    box=box,
-                    class_name=self.classes_map[int(class_idx)],
+                    shape=shape,
+                    class_name=self.classes_map[class_idx],
                 )
                 annotations.append(anno)
         return annotations
@@ -550,20 +679,39 @@ class UltralyticsSource:
         predictions = []
         with open(pred_file, "r") as f:
             for line in f:
-                class_idx, x_center, y_center, width, height, conf = map(
-                    float, line.strip().split()
-                )
-                if conf < self.conf_thres:
-                    continue
+                floats = list(map(float, line.strip().split()))
+                class_idx = int(floats[0])
 
-                box = self._convert_to_box(
-                    x_center, y_center, width, height, img_width, img_height
-                )
+                if not self.load_polygons:
+                    if len(floats) != 6:
+                        raise Exception("wrong bbox format")
+
+                    x_center, y_center, width, height, conf = floats[1:]
+                    if conf < self.conf_thres:
+                        continue
+
+                    shape = self._convert_to_box(
+                        x_center, y_center, width, height, img_width, img_height
+                    )
+                else:
+                    if len(floats) < 4:
+                        raise Exception("wrong polygons format")
+
+                    conf = floats[-1]
+                    if conf < self.conf_thres:
+                        continue
+
+                    coords = floats[1:-1]
+                    if len(coords) < 2:
+                        raise Exception("wrong polygons format")
+
+                    shape = self._convert_to_polygon(coords, img_width, img_height)
+
                 pred = Prediction(
                     id=str(uuid.uuid4()),
-                    box=box,
-                    class_name=self.classes_map[int(class_idx)],
-                    conf=conf,
+                    shape=shape,
+                    class_name=self.classes_map[class_idx],
+                    conf=conf if self.load_polygons else floats[-1],
                 )
                 predictions.append(pred)
         return predictions
@@ -582,6 +730,18 @@ class UltralyticsSource:
         x_max = (x_center + width / 2) * img_width
         y_max = (y_center + height / 2) * img_height
         return Box(top_left=Coords(x_min, y_min), bottom_right=Coords(x_max, y_max))
+
+    def _convert_to_polygon(
+        self, coords: list[float], img_width: int, img_height: int
+    ) -> Polygon:
+        points = []
+        for i in range(0, len(coords), 2):
+            x_norm = coords[i]
+            y_norm = coords[i + 1]
+            x_abs = x_norm * img_width
+            y_abs = y_norm * img_height
+            points.append((x_abs, y_abs))
+        return Polygon(points)
 
 
 def _filter_result(res: Result, cls: str):
@@ -637,10 +797,11 @@ class Displayer:
         self.save_dir = save_dir
         self.only_errors = only_errors
 
-    def display_compare_sources(self, algo: Algo, source_inputs: list[SourceInput]):
+    def display_compare_sources(self, algo, source_inputs: list):
         results = {}
         img_names = []
         last_result = None
+
         for inp in source_inputs:
             if inp.class_name not in inp.source.classes():
                 raise Exception(f"{inp.class_name} not exists")
@@ -653,16 +814,17 @@ class Displayer:
                 last_result = result
 
         if last_result is None:
-            raise Exception(f"last result is none")
+            raise Exception("No results found")
 
         root = os.path.dirname(last_result.image_path)
 
         for image_name in set(img_names):
             image_path = os.path.join(root, image_name)
             image = Image.open(image_path)
+
             if self.only_errors:
                 any_errors = False
-                for i, inp in enumerate(source_inputs):
+                for inp in source_inputs:
                     res = results[inp.name][image_name]
                     res_filtered = _filter_result(res, inp.class_name)
                     algo_res = algo.run(res_filtered.preds, res_filtered.annotations)
@@ -675,16 +837,13 @@ class Displayer:
             fig, axes = plt.subplots(
                 len(source_inputs), 3, figsize=(24, 7 * len(source_inputs))
             )
-
-            # Calculate spacing dynamically based on the number of inputs
             spacing = 1.0 / len(source_inputs)
+
             for i, inp in enumerate(source_inputs):
                 res = results[inp.name][image_name]
-
                 res_filtered = _filter_result(res, inp.class_name)
                 algo_res = algo.run(res_filtered.preds, res_filtered.annotations)
 
-                # Dynamically calculate the y position for the text
                 y_position = 1 - spacing * (i + 0.5)
                 fig.text(
                     0.05,
@@ -701,31 +860,22 @@ class Displayer:
                 axes[i][1].imshow(image)
                 axes[i][1].set_title(f"Predictions (FP in {self.fp_color})")
                 axes[i][2].imshow(image)
-                axes[i][2].set_title(f"Combined (Preds in blue)")
+                axes[i][2].set_title("Combined (Preds in blue)")
 
                 self._draw_anno_boxes(axes[i][0], res_filtered.annotations, algo_res)
                 self._draw_pred_boxes(axes[i][1], algo_res)
                 self._draw_anno_and_pred_boxes(
-                    axes[i][2],
-                    res_filtered.annotations,
-                    algo_res.tp + algo_res.fp,
+                    axes[i][2], res_filtered.annotations, algo_res.tp + algo_res.fp
                 )
 
             if self.save_dir:
                 self._save(image_path)
             else:
                 plt.show()
-                print()
 
             plt.close(fig)
 
-    def display(
-        self,
-        algo: Algo,
-        source: Source,
-        class_name: str,
-        limit: Union[int, None] = None,
-    ):
+    def display(self, algo, source, class_name: str, limit: Union[int, None] = None):
         results = source.load_results()
 
         if class_name not in source.classes():
@@ -748,7 +898,7 @@ class Displayer:
             ax2.imshow(image)
             ax2.set_title(f"Predictions (FP in {self.fp_color})")
             ax3.imshow(image)
-            ax3.set_title(f"Combined (Preds in blue)")
+            ax3.set_title("Combined (Preds in blue)")
 
             self._draw_anno_boxes(ax1, res_filtered.annotations, algo_res)
             self._draw_pred_boxes(ax2, algo_res)
@@ -779,39 +929,18 @@ class Displayer:
         self, ax, annos: list[Annotation], preds: list[Prediction]
     ):
         for ann in annos:
-            self._draw_box(ax, ann.box, "green")
-
+            ann.shape.draw(ax, conf=None, color="green")
         for pred in preds:
-            self._draw_box(ax, pred.box, "blue")
+            pred.shape.draw(ax, conf=pred.conf, color="blue")
 
     def _draw_anno_boxes(self, ax, annotations: list[Annotation], algo_res: AlgoResult):
         fn_ids = {fn.id for fn in algo_res.fn}
         for ann in annotations:
             color = self.fn_color if ann.id in fn_ids else self.tp_color
-            self._draw_box(ax, ann.box, color)
+            ann.shape.draw(ax, conf=None, color=color)
 
     def _draw_pred_boxes(self, ax, algo_res: AlgoResult):
         for pred in algo_res.fp:
-            self._draw_conf(ax, pred.box, pred.conf, self.fp_color)
-            self._draw_box(ax, pred.box, self.fp_color)
+            pred.shape.draw(ax, conf=pred.conf, color=self.fp_color)
         for pred in algo_res.tp:
-            self._draw_conf(ax, pred.box, pred.conf, self.tp_color)
-            self._draw_box(ax, pred.box, self.tp_color)
-
-    def _draw_box(self, ax, box: Box, color: str):
-        rect = patches.Rectangle(
-            (box.top_left.x, box.top_left.y),
-            box.bottom_right.x - box.top_left.x,
-            box.bottom_right.y - box.top_left.y,
-            linewidth=2,
-            edgecolor=color,
-            facecolor="none",
-            alpha=0.7,
-        )
-        ax.add_patch(rect)
-
-    def _draw_conf(self, ax, box: Box, conf: float, color: str):
-        x = box.top_left.x
-        y = box.top_left.y - 5
-        bbox_props = dict(boxstyle="round,pad=0.3", fc=color, ec="none", alpha=0.7)
-        ax.text(x, y, f"{conf:.2f}", color="white", fontsize=8, bbox=bbox_props)
+            pred.shape.draw(ax, conf=pred.conf, color=self.tp_color)
