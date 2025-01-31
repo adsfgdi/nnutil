@@ -4,6 +4,7 @@ import uuid
 from typing import Protocol, Union
 from dataclasses import dataclass
 from pathlib import Path
+import numpy as np
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -820,7 +821,6 @@ class Displayer:
 
         for image_name in set(img_names):
             image_path = os.path.join(root, image_name)
-            image = Image.open(image_path)
 
             if self.only_errors:
                 any_errors = False
@@ -855,12 +855,13 @@ class Displayer:
                     fontsize=16,
                 )
 
-                axes[i][0].imshow(image)
-                axes[i][0].set_title(f"Annotations (FN in {self.fp_color})")
-                axes[i][1].imshow(image)
-                axes[i][1].set_title(f"Predictions (FP in {self.fp_color})")
-                axes[i][2].imshow(image)
-                axes[i][2].set_title("Combined (Preds in blue)")
+                with Image.open(image_path) as image:
+                    axes[i][0].imshow(image)
+                    axes[i][0].set_title(f"Annotations (FN in {self.fp_color})")
+                    axes[i][1].imshow(image)
+                    axes[i][1].set_title(f"Predictions (FP in {self.fp_color})")
+                    axes[i][2].imshow(image)
+                    axes[i][2].set_title("Combined (Preds in blue)")
 
                 self._draw_anno_boxes(axes[i][0], res_filtered.annotations, algo_res)
                 self._draw_pred_boxes(axes[i][1], algo_res)
@@ -891,7 +892,9 @@ class Displayer:
             if self.only_errors and len(algo_res.fp) + len(algo_res.fn) == 0:
                 continue
 
-            image = Image.open(res_filtered.image_path)
+            with Image.open(res_filtered.image_path) as img:
+                image = np.array(img)
+
             fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(24, 7))
             ax1.imshow(image)
             ax1.set_title(f"Annotations (FN in {self.fp_color})")
