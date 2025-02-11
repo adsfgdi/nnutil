@@ -470,6 +470,20 @@ class PredictionMerger:
         return merged_box
 
 
+class CachedSource:
+    def __init__(self, source: Source):
+        self._source = source
+        self._cached_results = None
+
+    def load_results(self) -> list[Result]:
+        if self._cached_results is None:
+            self._cached_results = self._source.load_results()
+        return self._cached_results
+
+    def classes(self) -> list[str]:
+        return self._source.classes()
+
+
 class CocoSource:
     def __init__(
         self,
