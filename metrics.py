@@ -866,10 +866,12 @@ class Displayer:
         class_colors: dict,
         titles: tuple,
     ):
-        if limit is not None:
-            results = results[:limit]
+        displayed_count = 0
 
         for res in results:
+            if limit is not None and displayed_count >= limit:
+                break
+
             algo_res = algo.run(res.preds, res.annotations)
             if self.only_errors and len(algo_res.fp) + len(algo_res.fn) == 0:
                 continue
@@ -897,6 +899,8 @@ class Displayer:
                 plt.show()
 
             plt.close(fig)
+
+            displayed_count += 1
 
     def _save(self, image_path: str):
         os.makedirs(self.save_dir, exist_ok=True)
