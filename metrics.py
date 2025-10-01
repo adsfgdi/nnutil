@@ -9,6 +9,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import matplotlib.path as mpath
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
 from PIL import Image
 from shapely.geometry import Polygon as ShapelyPolygon
 
@@ -299,6 +301,10 @@ class DupsAreErrorsAlgo:
         for annotation in annotations:
             if annotation in matched_annotations:
                 continue
+
+            if prediction.class_name != annotation.class_name:
+                continue
+
             iou = prediction.shape.iou(annotation.shape)
             if iou >= self.iou_thres and iou > best_iou:
                 best_iou = iou
@@ -348,6 +354,9 @@ class OverlappingAlgo:
 
         for prediction in predictions:
             for annotation in annotations:
+                if prediction.class_name != annotation.class_name:
+                    continue
+
                 if prediction.shape.iou(annotation.shape) >= self.iou_thres:
                     matched_annotations.add(annotation)
                     matched_predictions.add(prediction)
@@ -800,131 +809,90 @@ class SourceInput:
 class Displayer:
     def __init__(
         self,
-        tp_color: str = "green",
         fp_color: str = "red",
         fn_color: str = "red",
         only_errors: bool = False,
         save_dir: str = "",
     ):
-        self.tp_color = tp_color
         self.fp_color = fp_color
         self.fn_color = fn_color
         self.save_dir = save_dir
         self.only_errors = only_errors
 
-    def display_compare_sources(self, algo, source_inputs: list):
-        results = {}
-        img_names = []
-        last_result = None
+    def display2(self, algo: Algo, source: Source, limit: Union[int, None] = None):
+        self._display_results(
+            algo=algo,
+            results=source.load_results(),
+            limit=limit,
+            class_colors=self._generate_class_colors(source.classes()),
+            titles=(
+                f"Annotations (FN in {self.fn_color})",
+                f"Predictions (FP in {self.fp_color})",
+                "Combined (by class)",
+            ),
+        )
 
-        for inp in source_inputs:
-            if inp.class_name not in inp.source.classes():
-                raise Exception(f"{inp.class_name} not exists")
-
-            results[inp.name] = {}
-            for result in inp.source.load_results():
-                image_name = os.path.basename(result.image_path)
-                img_names.append(image_name)
-                results[inp.name][image_name] = result
-                last_result = result
-
-        if last_result is None:
-            raise Exception("No results found")
-
-        root = os.path.dirname(last_result.image_path)
-
-        for image_name in set(img_names):
-            image_path = os.path.join(root, image_name)
-
-            if self.only_errors:
-                any_errors = False
-                for inp in source_inputs:
-                    res = results[inp.name][image_name]
-                    res_filtered = _filter_result(res, inp.class_name)
-                    algo_res = algo.run(res_filtered.preds, res_filtered.annotations)
-                    if len(algo_res.fp) + len(algo_res.fn) != 0:
-                        any_errors = True
-                        break
-                if not any_errors:
-                    continue
-
-            fig, axes = plt.subplots(
-                len(source_inputs), 3, figsize=(24, 7 * len(source_inputs))
-            )
-            spacing = 1.0 / len(source_inputs)
-
-            for i, inp in enumerate(source_inputs):
-                res = results[inp.name][image_name]
-                res_filtered = _filter_result(res, inp.class_name)
-                algo_res = algo.run(res_filtered.preds, res_filtered.annotations)
-
-                y_position = 1 - spacing * (i + 0.5)
-                fig.text(
-                    0.05,
-                    y_position,
-                    inp.name,
-                    va="center",
-                    ha="center",
-                    rotation="vertical",
-                    fontsize=16,
-                )
-
-                with Image.open(image_path) as image:
-                    axes[i][0].imshow(image)
-                    axes[i][0].set_title(f"Annotations (FN in {self.fp_color})")
-                    axes[i][1].imshow(image)
-                    axes[i][1].set_title(f"Predictions (FP in {self.fp_color})")
-                    axes[i][2].imshow(image)
-                    axes[i][2].set_title("Combined (Preds in blue)")
-
-                self._draw_anno_boxes(axes[i][0], res_filtered.annotations, algo_res)
-                self._draw_pred_boxes(axes[i][1], algo_res)
-                self._draw_anno_and_pred_boxes(
-                    axes[i][2], res_filtered.annotations, algo_res.tp + algo_res.fp
-                )
-
-            if self.save_dir:
-                self._save(image_path)
-            else:
-                plt.show()
-
-            plt.close(fig)
-
-    def display(self, algo, source, class_name: str, limit: Union[int, None] = None):
+    def display(
+        self,
+        algo: Algo,
+        source: Source,
+        class_name: str,
+        limit: Union[int, None] = None,
+    ):
         results = source.load_results()
-
-        if class_name not in source.classes():
+        classes = source.classes()
+        if class_name not in classes:
             raise Exception(f"{class_name} not exists")
 
+        filtered_results = [_filter_result(res, class_name) for res in results]
+
+        self._display_results(
+            algo=algo,
+            results=filtered_results,
+            limit=limit,
+            class_colors={class_name: "green"},
+            titles=(
+                f"Annotations (FN in {self.fn_color})",
+                f"Predictions (FP in {self.fp_color})",
+                "Combined (Preds in blue)",
+            ),
+        )
+
+    def _display_results(
+        self,
+        algo: Algo,
+        results: list,
+        limit: Union[int, None],
+        class_colors: dict,
+        titles: tuple,
+    ):
         if limit is not None:
             results = results[:limit]
 
         for res in results:
-            res_filtered = _filter_result(res, class_name)
-            algo_res = algo.run(res_filtered.preds, res_filtered.annotations)
-
+            algo_res = algo.run(res.preds, res.annotations)
             if self.only_errors and len(algo_res.fp) + len(algo_res.fn) == 0:
                 continue
 
-            with Image.open(res_filtered.image_path) as img:
+            with Image.open(res.image_path) as img:
                 image = np.array(img)
 
             fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(24, 7))
             ax1.imshow(image)
-            ax1.set_title(f"Annotations (FN in {self.fp_color})")
+            ax1.set_title(titles[0])
             ax2.imshow(image)
-            ax2.set_title(f"Predictions (FP in {self.fp_color})")
+            ax2.set_title(titles[1])
             ax3.imshow(image)
-            ax3.set_title("Combined (Preds in blue)")
+            ax3.set_title(titles[2])
 
-            self._draw_anno_boxes(ax1, res_filtered.annotations, algo_res)
-            self._draw_pred_boxes(ax2, algo_res)
+            self._draw_anno_boxes(ax1, res.annotations, algo_res, class_colors)
+            self._draw_pred_boxes(ax2, algo_res, class_colors)
             self._draw_anno_and_pred_boxes(
-                ax3, res_filtered.annotations, algo_res.tp + algo_res.fp
+                ax3, res.annotations, algo_res.tp + algo_res.fp
             )
 
             if self.save_dir:
-                self._save(res_filtered.image_path)
+                self._save(res.image_path)
             else:
                 plt.show()
 
@@ -942,22 +910,50 @@ class Displayer:
         name = os.path.splitext(os.path.basename(image_path))[0] + "_res"
         return os.path.join(self.save_dir, name)
 
-    def _draw_anno_and_pred_boxes(
-        self, ax, annos: list[Annotation], preds: list[Prediction]
+    def _draw_anno_boxes(
+        self,
+        ax,
+        annotations: list[Annotation],
+        algo_res: AlgoResult,
+        colors: dict[str, str],
     ):
-        for ann in annos:
-            ann.shape.draw(ax, conf=None, color="green")
-        for pred in preds:
-            pred.shape.draw(ax, conf=pred.conf, color="blue")
-
-    def _draw_anno_boxes(self, ax, annotations: list[Annotation], algo_res: AlgoResult):
         fn_ids = {fn.id for fn in algo_res.fn}
+
         for ann in annotations:
-            color = self.fn_color if ann.id in fn_ids else self.tp_color
+            color = self.fn_color if ann.id in fn_ids else colors[ann.class_name]
             ann.shape.draw(ax, conf=None, color=color)
 
-    def _draw_pred_boxes(self, ax, algo_res: AlgoResult):
+    def _draw_pred_boxes(self, ax, algo_res: AlgoResult, colors: dict[str, str]):
         for pred in algo_res.fp:
             pred.shape.draw(ax, conf=pred.conf, color=self.fp_color)
         for pred in algo_res.tp:
-            pred.shape.draw(ax, conf=pred.conf, color=self.tp_color)
+            pred.shape.draw(ax, conf=pred.conf, color=colors[pred.class_name])
+
+    def _draw_anno_and_pred_boxes(
+        self,
+        ax,
+        annos: list[Annotation],
+        preds: list[Prediction],
+        anno_color: str = "green",
+        pred_color: str = "blue",
+    ):
+        for ann in annos:
+            ann.shape.draw(ax, conf=None, color=anno_color)
+        for pred in preds:
+            pred.shape.draw(ax, conf=pred.conf, color=pred_color)
+
+    def _generate_class_colors(self, classes: list[str]) -> dict[str, str]:
+        """Генерирует уникальные цвета для каждого класса"""
+        if len(classes) <= 10:
+            cmap = cm.get_cmap("tab10")
+            colors = [mcolors.rgb2hex(cmap(i)) for i in range(len(classes))]
+        elif len(classes) <= 20:
+            cmap = cm.get_cmap("tab20")
+            colors = [mcolors.rgb2hex(cmap(i)) for i in range(len(classes))]
+        else:
+            cmap = cm.get_cmap("hsv")
+            colors = [
+                mcolors.rgb2hex(cmap(i / len(classes))) for i in range(len(classes))
+            ]
+
+        return dict(zip(classes, colors))
